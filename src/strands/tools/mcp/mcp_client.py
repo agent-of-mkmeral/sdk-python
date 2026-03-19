@@ -5,6 +5,45 @@ It manages the lifecycle of MCP connections, including initialization, tool disc
 tool invocation, and proper cleanup of resources. The connection runs in a background
 thread to avoid blocking the main application thread while maintaining communication
 with the MCP service.
+
+Option B (Pass-Through) Integration
+------------------------------------
+This module implements the "pass-through" approach to MCP integration:
+
+- **All MCP ClientSession callbacks** (sampling, list_roots, logging, progress, elicitation)
+  are exposed as MCPClient constructor parameters and wired directly to the underlying
+  ClientSession.
+- **No Agent changes required**: Users wire callbacks manually on MCPClient instances.
+- **Default logging callback**: Routes MCP server log messages to Python's ``logging`` module.
+- **_meta extraction**: The ``_meta`` key is extracted from tool arguments and passed as
+  ``meta=`` to ``session.call_tool()``, enabling protocol-level metadata (e.g., progress tokens).
+- **progress_callback**: Passed per-call to ``session.call_tool()`` for real-time progress.
+
+Usage Example::
+
+    from strands.tools.mcp import MCPClient
+
+    async def my_sampling(context, params):
+        # Handle sampling requests from MCP server
+        ...
+
+    async def my_roots(context):
+        # Return roots for the MCP server
+        ...
+
+    def on_progress(progress, total, message):
+        print(f"Progress: {progress}/{total} - {message}")
+
+    client = MCPClient(
+        transport_callable=my_transport,
+        sampling_callback=my_sampling,
+        list_roots_callback=my_roots,
+        progress_callback=on_progress,
+    )
+
+    with client:
+        tools = client.list_tools_sync()
+        result = client.call_tool_sync("id", "my_tool", {"arg": "value"})
 """
 
 import asyncio
@@ -23,13 +62,15 @@ from typing import Any, TypeVar, cast
 
 import anyio
 from mcp import ClientSession, ListToolsResult
-from mcp.client.session import ElicitationFnT
+from mcp.client.session import ElicitationFnT, ListRootsFnT, LoggingFnT, SamplingFnT
+from mcp.shared.session import ProgressFnT
 from mcp.types import (
     BlobResourceContents,
     GetPromptResult,
     ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
+    LoggingMessageNotificationParams,
     ReadResourceResult,
     TextResourceContents,
 )
@@ -97,6 +138,35 @@ _NON_FATAL_ERROR_PATTERNS = [
 ]
 
 
+def _default_logging_callback(params: LoggingMessageNotificationParams) -> None:
+    """Default logging callback that routes MCP server log messages to Python logging.
+
+    Maps MCP log levels to Python logging levels:
+    - emergency, alert, critical -> CRITICAL
+    - error -> ERROR
+    - warning -> WARNING
+    - notice, info -> INFO
+    - debug -> DEBUG
+
+    Args:
+        params: The MCP logging notification parameters containing level, logger name, and data.
+    """
+    level_map = {
+        "emergency": logging.CRITICAL,
+        "alert": logging.CRITICAL,
+        "critical": logging.CRITICAL,
+        "error": logging.ERROR,
+        "warning": logging.WARNING,
+        "notice": logging.INFO,
+        "info": logging.INFO,
+        "debug": logging.DEBUG,
+    }
+    py_level = level_map.get(params.level, logging.INFO)
+    mcp_logger_name = f"strands.mcp.server.{params.logger}" if params.logger else "strands.mcp.server"
+    mcp_logger = logging.getLogger(mcp_logger_name)
+    mcp_logger.log(py_level, "%s", params.data)
+
+
 class MCPClient(ToolProvider):
     """Represents a connection to a Model Context Protocol (MCP) server.
 
@@ -107,6 +177,20 @@ class MCPClient(ToolProvider):
     The connection runs in a background thread to avoid blocking the main application thread
     while maintaining communication with the MCP service. When structured content is available
     from MCP tools, it will be returned as the last item in the content array of the ToolResult.
+
+    Option B (Pass-Through) Callback Wiring
+    ----------------------------------------
+    All MCP ClientSession callbacks are exposed as constructor parameters:
+
+    - ``sampling_callback``: Handle ``sampling/createMessage`` requests from the server.
+    - ``list_roots_callback``: Handle ``roots/list`` requests from the server.
+    - ``logging_callback``: Handle ``notifications/message`` log messages from the server.
+      Defaults to routing to Python ``logging``.
+    - ``progress_callback``: Receive per-call progress updates from ``call_tool()``.
+    - ``elicitation_callback``: Handle elicitation requests from the server.
+
+    These callbacks are passed directly to the underlying ``ClientSession`` with no
+    additional Agent-level wiring, keeping the integration minimal and composable.
     """
 
     def __init__(
@@ -117,6 +201,10 @@ class MCPClient(ToolProvider):
         tool_filters: ToolFilters | None = None,
         prefix: str | None = None,
         elicitation_callback: ElicitationFnT | None = None,
+        sampling_callback: SamplingFnT | None = None,
+        list_roots_callback: ListRootsFnT | None = None,
+        logging_callback: LoggingFnT | None = _default_logging_callback,
+        progress_callback: ProgressFnT | None = None,
         tasks_config: TasksConfig | None = None,
     ) -> None:
         """Initialize a new MCP Server connection.
@@ -128,6 +216,16 @@ class MCPClient(ToolProvider):
             tool_filters: Optional filters to apply to tools.
             prefix: Optional prefix for tool names.
             elicitation_callback: Optional callback function to handle elicitation requests from the MCP server.
+            sampling_callback: Optional callback to handle sampling/createMessage requests from the MCP server.
+                This enables the server to request LLM completions through the client.
+            list_roots_callback: Optional callback to handle roots/list requests from the MCP server.
+                This enables the server to discover the client's root URIs.
+            logging_callback: Callback to handle log messages from the MCP server.
+                Defaults to ``_default_logging_callback`` which routes to Python ``logging``.
+                Pass ``None`` to disable log handling.
+            progress_callback: Optional callback for per-call progress notifications.
+                When provided, this is passed to each ``session.call_tool()`` invocation
+                so the server can report real-time progress.
             tasks_config: Configuration for MCP task-augmented execution for long-running tools.
                 If provided (not None), enables task-augmented execution for tools that support it.
                 See TasksConfig for details. This feature is experimental and subject to change.
@@ -136,6 +234,10 @@ class MCPClient(ToolProvider):
         self._tool_filters = tool_filters
         self._prefix = prefix
         self._elicitation_callback = elicitation_callback
+        self._sampling_callback = sampling_callback
+        self._list_roots_callback = list_roots_callback
+        self._logging_callback = logging_callback
+        self._progress_callback = progress_callback
 
         mcp_instrumentation()
         self._session_id = uuid.uuid4()
@@ -571,6 +673,13 @@ class MCPClient(ToolProvider):
         This method encapsulates the decision logic for whether to use task-augmented
         execution or direct call_tool, returning the appropriate coroutine.
 
+        Bug fix: Extracts ``_meta`` from the arguments dict and passes it as the
+        ``meta=`` keyword argument to ``session.call_tool()``. This enables protocol-level
+        metadata (e.g., progress tokens) to flow through correctly.
+
+        Bug fix: Passes ``progress_callback`` to ``session.call_tool()`` when configured,
+        enabling real-time progress notifications from the MCP server.
+
         Args:
             name: Name of the tool to call.
             arguments: Optional arguments to pass to the tool.
@@ -579,6 +688,14 @@ class MCPClient(ToolProvider):
         Returns:
             A coroutine that will execute the tool call.
         """
+        # Extract _meta from arguments if present (bug fix)
+        meta: dict[str, Any] | None = None
+        if arguments is not None and "_meta" in arguments:
+            # Make a shallow copy so we don't mutate the caller's dict
+            arguments = dict(arguments)
+            meta = arguments.pop("_meta")
+
+        progress_callback = self._progress_callback
         use_task = self._should_use_task(name)
 
         if use_task:
@@ -595,7 +712,11 @@ class MCPClient(ToolProvider):
 
             async def _call_tool_direct() -> MCPCallToolResult:
                 return await cast(ClientSession, self._background_thread_session).call_tool(
-                    name, arguments, read_timeout_seconds
+                    name,
+                    arguments,
+                    read_timeout_seconds,
+                    progress_callback=progress_callback,
+                    meta=meta,
                 )
 
             return _call_tool_direct()
@@ -673,6 +794,7 @@ class MCPClient(ToolProvider):
             status="error",
             toolUseId=tool_use_id,
             content=[{"text": f"Tool execution failed: {str(exception)}"}],
+            isError=True,
         )
 
     def _handle_tool_result(self, tool_use_id: str, call_tool_result: MCPCallToolResult) -> MCPToolResult:
@@ -680,6 +802,9 @@ class MCPClient(ToolProvider):
 
         This method processes the content from the MCP tool call result and converts it to the format
         expected by the framework.
+
+        Bug fix: Populates ``isError`` field from ``call_tool_result.isError`` so downstream
+        consumers can distinguish error results without inspecting the ``status`` string.
 
         Args:
             tool_use_id: Unique identifier for this tool use
@@ -703,6 +828,7 @@ class MCPClient(ToolProvider):
             status=status,
             toolUseId=tool_use_id,
             content=mapped_contents,
+            isError=bool(call_tool_result.isError),
         )
 
         if call_tool_result.structuredContent:
@@ -717,6 +843,9 @@ class MCPClient(ToolProvider):
 
         This method establishes the transport connection, creates and initializes the MCP session,
         signals readiness to the main thread, and waits for a close signal.
+
+        All configured callbacks (sampling, list_roots, logging, elicitation) are passed
+        through to the ClientSession constructor.
         """
         self._log_debug_with_thread("starting async background thread for MCP connection")
 
@@ -731,6 +860,9 @@ class MCPClient(ToolProvider):
                     write_stream,
                     message_handler=self._handle_error_message,
                     elicitation_callback=self._elicitation_callback,
+                    sampling_callback=self._sampling_callback,
+                    list_roots_callback=self._list_roots_callback,
+                    logging_callback=self._logging_callback,
                 ) as session:
                     self._log_debug_with_thread("initializing MCP session")
                     init_result = await session.initialize()
