@@ -45,6 +45,16 @@ from .events import (
     MessageAddedEvent,
     MultiAgentInitializedEvent,
 )
+from .mcp_events import (
+    MCPCancelledEvent,
+    MCPEvent,
+    MCPLogEvent,
+    MCPProgressEvent,
+    MCPPromptsChangedEvent,
+    MCPResourcesChangedEvent,
+    MCPResourceUpdatedEvent,
+    MCPToolsChangedEvent,
+)
 from .registry import BaseHookEvent, HookCallback, HookEvent, HookProvider, HookRegistry
 
 __all__ = [
@@ -62,6 +72,14 @@ __all__ = [
     "HookRegistry",
     "HookEvent",
     "BaseHookEvent",
+    "MCPCancelledEvent",
+    "MCPEvent",
+    "MCPLogEvent",
+    "MCPProgressEvent",
+    "MCPPromptsChangedEvent",
+    "MCPResourcesChangedEvent",
+    "MCPResourceUpdatedEvent",
+    "MCPToolsChangedEvent",
     "AfterMultiAgentInvocationEvent",
     "AfterNodeCallEvent",
     "BeforeMultiAgentInvocationEvent",

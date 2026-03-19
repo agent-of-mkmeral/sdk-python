@@ -55,6 +55,9 @@ class MCPToolResult(ToolResult):
     that provides structured results beyond the standard text/image/document content.
 
     Attributes:
+        isError: Whether the MCP tool reported an error. Populated from
+            ``CallToolResult.isError`` so that callers can distinguish MCP-level
+            errors without inspecting the ``status`` field.
         structuredContent: Optional JSON object containing structured data returned
             by the MCP tool. This allows MCP tools to return complex data structures
             that can be processed programmatically by agents or other tools.
@@ -63,5 +66,6 @@ class MCPToolResult(ToolResult):
             performance metrics, or business-specific tracking information).
     """
 
+    isError: NotRequired[bool]
     structuredContent: NotRequired[dict[str, Any]]
     metadata: NotRequired[dict[str, Any]]
