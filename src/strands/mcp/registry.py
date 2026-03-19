@@ -179,8 +179,15 @@ def load_mcp_servers(
     if isinstance(config, str):
         config = json.loads(config)
 
-    # Accept both {"mcpServers": {...}} and the inner dict directly
-    servers: dict[str, Any] = config.get("mcpServers", config)
+    # Accept both {"mcpServers": {...}} and the inner dict directly.
+    # Heuristic: if config has "mcpServers" and its value is a dict whose
+    # values are themselves dicts (server configs), treat it as the wrapper.
+    # Otherwise, treat the entire config as the inner mapping.
+    raw = config.get("mcpServers")
+    if isinstance(raw, dict) and all(isinstance(v, dict) for v in raw.values()):
+        servers: dict[str, Any] = raw
+    else:
+        servers = config
 
     clients: dict[str, MCPClient] = {}
     for name, cfg in servers.items():
