@@ -157,6 +157,11 @@ class MCPPlugin(Plugin):
         Args:
             agent: The agent instance being initialised.
         """
+        # Guard against double init_agent calls
+        if self._agent is agent:
+            logger.debug("plugin=<mcp> | init_agent already called for this agent, skipping")
+            return
+
         self._agent = agent
 
         for client in self._clients:
@@ -336,7 +341,7 @@ def load_mcp_servers(config_path: str | Path) -> list[MCPClient]:
     with open(path, "r", encoding="utf-8") as fh:
         raw_config = json.load(fh)
 
-    servers = raw_config.get("mcpServers", {})
+    servers = raw_config.get("mcpServers") or {}
     clients: list[MCPClient] = []
 
     for name, cfg in servers.items():
