@@ -59,13 +59,16 @@ from .mcp_client import MCPClient, ToolFilters
 
 logger = logging.getLogger(__name__)
 
+# Sentinel to distinguish "not provided" from "explicitly None"
+_UNSET = object()
+
 
 def load_mcp_servers(
     config: str | Path | dict[str, Any],
     *,
     sampling_callback: SamplingFnT | None = None,
     list_roots_callback: ListRootsFnT | None = None,
-    logging_callback: LoggingFnT | None = None,
+    logging_callback: LoggingFnT | None | object = _UNSET,
     progress_callback: ProgressFnT | None = None,
     elicitation_callback: ElicitationFnT | None = None,
     startup_timeout: int = 30,
@@ -91,7 +94,8 @@ def load_mcp_servers(
         sampling_callback: Sampling callback applied to all servers.
         list_roots_callback: List roots callback applied to all servers.
         logging_callback: Logging callback applied to all servers.
-            Pass ``None`` to use the MCPClient default (Python logging).
+            If not provided, MCPClient's default (Python logging) is used.
+            Pass ``None`` explicitly to disable logging.
         progress_callback: Progress callback applied to all servers.
         elicitation_callback: Elicitation callback applied to all servers.
         startup_timeout: Startup timeout for each MCPClient.
@@ -149,9 +153,6 @@ def load_mcp_servers(
                 logger.warning("server=%s | no valid transport configuration found, skipping", name)
                 continue
 
-            # Determine logging callback: use provided or sentinel for "use default"
-            effective_logging = logging_callback if logging_callback is not None else None
-
             # Build kwargs, only passing logging_callback if explicitly provided
             kwargs: dict[str, Any] = {
                 "startup_timeout": startup_timeout,
@@ -162,7 +163,9 @@ def load_mcp_servers(
                 "progress_callback": progress_callback,
                 "elicitation_callback": elicitation_callback,
             }
-            if logging_callback is not None:
+            # Use sentinel to distinguish "not provided" (use MCPClient default)
+            # from "explicitly None" (disable logging)
+            if logging_callback is not _UNSET:
                 kwargs["logging_callback"] = logging_callback
 
             client = MCPClient(
