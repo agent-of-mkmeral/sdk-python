@@ -32,6 +32,7 @@ from ..tools._tool_helpers import generate_missing_tool_result_content
 
 if TYPE_CHECKING:
     from ..tools import ToolProvider
+    from ..tools.mcp.mcp_client import MCPClient
 from ..handlers.callback_handler import PrintingCallbackHandler, null_callback_handler
 from ..hooks import (
     AfterInvocationEvent,
@@ -135,6 +136,7 @@ class Agent(AgentBase):
         tool_executor: ToolExecutor | None = None,
         retry_strategy: ModelRetryStrategy | _DefaultRetryStrategySentinel | None = _DEFAULT_RETRY_STRATEGY,
         concurrent_invocation_mode: ConcurrentInvocationMode = ConcurrentInvocationMode.THROW,
+        mcp_clients: dict[str, "MCPClient"] | list["MCPClient"] | None = None,
     ):
         """Initialize the Agent with the specified configuration.
 
@@ -201,6 +203,14 @@ class Agent(AgentBase):
                 Set to "unsafe_reentrant" to skip lock acquisition entirely, allowing concurrent invocations.
                 Warning: "unsafe_reentrant" makes no guarantees about resulting behavior and is provided
                 only for advanced use cases where the caller understands the risks.
+            mcp_clients: Optional MCP server connections to register with the agent.
+                Can be:
+                - A dict mapping server names to MCPClient instances
+                - A list of MCPClient instances (auto-named "mcp_0", "mcp_1", …)
+                - None to skip MCP registration.
+                When provided, an MCPRegistry is created and its tools are registered
+                with the agent. MCP server notifications are routed through the agent's
+                hook system as MCPEvent subclasses.
 
         Raises:
             ValueError: If agent id contains path separators.
@@ -327,6 +337,20 @@ class Agent(AgentBase):
         if plugins:
             for plugin in plugins:
                 self._plugin_registry.add_and_init(plugin)
+
+        # Wire MCP clients through MCPRegistry if provided
+        self._mcp_registry = None
+        if mcp_clients is not None:
+            from ..mcp.registry import MCPRegistry
+
+            if isinstance(mcp_clients, list):
+                named = {f"mcp_{i}": c for i, c in enumerate(mcp_clients)}
+            elif isinstance(mcp_clients, dict):
+                named = mcp_clients
+            else:
+                raise TypeError("mcp_clients must be a dict or list of MCPClient instances")
+            self._mcp_registry = MCPRegistry(named)
+            self._mcp_registry.register_tools(self.tool_registry, self.hooks)
 
         self.hooks.invoke_callbacks(AgentInitializedEvent(agent=self))
 
