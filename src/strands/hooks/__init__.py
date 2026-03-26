@@ -45,9 +45,19 @@ from .events import (
     MessageAddedEvent,
     MultiAgentInitializedEvent,
 )
+from .mcp_events import (
+    MCPLoggingEvent,
+    MCPProgressEvent,
+    MCPSamplingRequestEvent,
+    MCPServerConnectedEvent,
+    MCPServerDisconnectedEvent,
+    MCPToolCallEndEvent,
+    MCPToolCallStartEvent,
+)
 from .registry import BaseHookEvent, HookCallback, HookEvent, HookProvider, HookRegistry
 
 __all__ = [
+    # Agent lifecycle events
     "AgentInitializedEvent",
     "BeforeInvocationEvent",
     "BeforeToolCallEvent",
@@ -56,15 +66,25 @@ __all__ = [
     "AfterModelCallEvent",
     "AfterInvocationEvent",
     "MessageAddedEvent",
+    # Registry
     "HookEvent",
     "HookProvider",
     "HookCallback",
     "HookRegistry",
     "HookEvent",
     "BaseHookEvent",
+    # Multiagent events
     "AfterMultiAgentInvocationEvent",
     "AfterNodeCallEvent",
     "BeforeMultiAgentInvocationEvent",
     "BeforeNodeCallEvent",
     "MultiAgentInitializedEvent",
+    # MCP events
+    "MCPServerConnectedEvent",
+    "MCPServerDisconnectedEvent",
+    "MCPToolCallStartEvent",
+    "MCPToolCallEndEvent",
+    "MCPLoggingEvent",
+    "MCPProgressEvent",
+    "MCPSamplingRequestEvent",
 ]
