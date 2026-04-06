@@ -245,7 +245,7 @@ pre-commit install -t pre-commit -t commit-msg # Install hooks
 
 1. Create feature branch
 2. Implement changes following the patterns below
-3. Run quality checks before committing
+3. Run `hatch run prepare` before committing (runs formatting, linting, and tests)
 4. Commit with conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`)
 5. Push and open PR
 
@@ -262,13 +262,15 @@ See PR.md for the complete guidance and template.
 
 ### 4. Quality Gates
 
-Pre-commit hooks run automatically on commit:
-- Formatting (ruff)
-- Linting (ruff + mypy)
-- Tests (pytest)
-- Commit message validation (commitizen)
+Run the full readiness check before committing:
 
-All checks must pass before commit is allowed.
+```bash
+hatch run prepare              # Runs formatting, linting, and tests
+```
+
+This is the main quality gate — it runs all formatting (ruff), linting (ruff + mypy), and tests (pytest) in one command. Always run this before pushing.
+
+Pre-commit hooks also run automatically on commit if configured (`pre-commit install`), including commit message validation (commitizen).
 
 ## Coding Patterns and Best Practices
 
@@ -487,7 +489,7 @@ Task-augmented execution is used when ALL conditions are met:
 - Add type annotations everywhere
 - Use relative imports within packages
 - Mirror src/ structure in tests/
-- Run `hatch fmt --formatter` and `hatch fmt --linter` before committing
+- Run `hatch run prepare` before committing (runs formatting, linting, and tests)
 - Follow conventional commits (`feat:`, `fix:`, `docs:`, etc.)
 
 ## Things NOT to Do
@@ -496,7 +498,7 @@ Task-augmented execution is used when ALL conditions are met:
 - Don't use `Any` type without good reason
 - Don't skip type annotations
 - Don't put unit tests outside `tests/strands/` structure
-- Don't commit without running pre-commit hooks
+- Don't commit without running `hatch run prepare`
 - Don't add punctuation to log messages
 - Don't use implicit optional types
 
