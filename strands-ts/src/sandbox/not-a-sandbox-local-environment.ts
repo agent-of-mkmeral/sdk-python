@@ -10,6 +10,8 @@ import type { ExecutionResult, FileInfo, StreamChunk } from './types.js'
  * Runs on the host with no isolation. Used as the default when no sandbox is configured.
  */
 export class NotASandboxLocalEnvironment extends Sandbox {
+  override toolPrefix = undefined
+
   private _resolvePath(path: string): string {
     return isAbsolute(path) ? path : join(process.cwd(), path)
   }
