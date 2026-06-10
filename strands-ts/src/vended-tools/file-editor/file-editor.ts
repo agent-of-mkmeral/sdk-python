@@ -1,7 +1,7 @@
 import { tool } from '../../tools/tool-factory.js'
 import { z } from 'zod'
 import { Buffer } from 'buffer'
-import type { Sandbox } from '../../sandbox/base.js'
+import { Sandbox } from '../../sandbox/base.js'
 import * as path from 'path'
 
 const SNIPPET_LINES = 4
@@ -53,25 +53,40 @@ const fileEditorInputSchema = z.object({
 export const DEFAULT_FILE_EDITOR_DESCRIPTION =
   'Filesystem editor tool for viewing, creating, and editing files. Supports view (with line ranges), create, str_replace, and insert operations. Files must use absolute paths.'
 
+/**
+ * Options form for {@link makeFileEditor}. Binding-only: metadata customization
+ * (name, description) is handled by `customizeTool` instead.
+ */
 export interface MakeFileEditorOptions {
+  /** Sandbox to bind at creation time. If omitted, resolved from `context.agent.sandbox` at call time. */
   sandbox?: Sandbox
-  name?: string
-  description?: string
 }
 
 /**
- * Create a file editor tool. If a sandbox is provided, it's bound at creation time.
- * Otherwise, the tool reads from `context.agent.sandbox` at call time.
- * Used by sandbox implementations in `getTools()` and by users who want a customized file editor.
+ * Create a file editor tool bound to the given sandbox.
+ *
+ * If a sandbox is provided, it's bound at creation time. Otherwise, the tool
+ * reads from `context.agent.sandbox` at call time. Used by sandbox
+ * implementations in `getTools()`.
+ *
+ * To customize the tool's name or description, wrap the result with
+ * `customizeTool` — this factory intentionally does binding only:
+ * ```typescript
+ * customizeTool(makeFileEditor(sandbox), { description: 'Files are on host X.' })
+ * ```
+ *
+ * @param sandboxOrOptions - A sandbox instance, or an options object.
+ * @returns A file editor tool routing I/O through the bound (or agent's) sandbox.
  */
-export function makeFileEditor(options: MakeFileEditorOptions = {}): ReturnType<typeof tool> {
+export function makeFileEditor(sandboxOrOptions: Sandbox | MakeFileEditorOptions = {}): ReturnType<typeof tool> {
+  const boundSandbox = sandboxOrOptions instanceof Sandbox ? sandboxOrOptions : sandboxOrOptions.sandbox
   return tool({
-    name: options.name ?? 'fileEditor',
-    description: options.description ?? DEFAULT_FILE_EDITOR_DESCRIPTION,
+    name: 'fileEditor',
+    description: DEFAULT_FILE_EDITOR_DESCRIPTION,
     inputSchema: fileEditorInputSchema,
     callback: async (input, context) => {
       if (!context) throw new Error('Tool context is required for fileEditor operations')
-      const sandbox = options.sandbox ?? context.agent.sandbox
+      const sandbox = boundSandbox ?? context.agent.sandbox
       const filePath = input.path.replace(/[/\\]+$/, '')
 
       switch (input.command) {

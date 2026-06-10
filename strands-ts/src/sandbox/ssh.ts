@@ -8,6 +8,7 @@ import { shellQuote } from './constants.js'
 import { streamProcess } from './stream-process.js'
 import type { ExecutionResult, StreamChunk } from './types.js'
 import type { Tool } from '../tools/tool.js'
+import { customizeTool } from '../tools/customize-tool.js'
 import { makeFileEditor, DEFAULT_FILE_EDITOR_DESCRIPTION } from '../vended-tools/file-editor/file-editor.js'
 import { makeBash } from '../vended-tools/bash/make-bash.js'
 import { SANDBOX_BASH_DESCRIPTION } from '../vended-tools/bash/types.js'
@@ -157,12 +158,10 @@ export class SshSandbox extends PosixShellSandbox {
 
   override getTools(): Tool[] {
     return [
-      makeFileEditor({
-        sandbox: this,
+      customizeTool(makeFileEditor(this), {
         description: `${DEFAULT_FILE_EDITOR_DESCRIPTION} Files are on host "${this.host}".`,
       }),
-      makeBash({
-        sandbox: this,
+      customizeTool(makeBash(this), {
         description: `${SANDBOX_BASH_DESCRIPTION} Runs on host "${this.host}". Working directory: ${this.workingDir}.`,
       }),
     ]

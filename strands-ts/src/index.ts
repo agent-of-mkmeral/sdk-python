@@ -141,6 +141,10 @@ export type { ZodToolConfig } from './tools/zod-tool.js'
 // Tool factory function
 export { tool } from './tools/tool-factory.js'
 
+// Tool customization wrapper
+export { customizeTool } from './tools/customize-tool.js'
+export type { ToolOverrides } from './tools/customize-tool.js'
+
 // Streaming event types
 export type {
   Usage,

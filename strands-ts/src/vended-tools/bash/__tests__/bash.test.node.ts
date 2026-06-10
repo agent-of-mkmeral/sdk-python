@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { bash, makeBash } from '../index.js'
 import { BashTimeoutError, BashSessionError, type BashOutput } from '../index.js'
 import type { ToolContext } from '../../../index.js'
+import { customizeTool } from '../../../index.js'
 import { StateStore } from '../../../state-store.js'
 import { createMockAgent } from '../../../__fixtures__/agent-helpers.js'
 import { TestSandbox } from '../../../__fixtures__/test-sandbox.node.js'
@@ -518,5 +519,85 @@ describe.skipIf(process.platform === 'win32')('makeBash (sandbox-bound)', () => 
   it('respects timeout', async () => {
     const { sandboxBash, context } = createSandboxBash()
     await expect(sandboxBash.invoke({ command: 'sleep 10', timeout: 0.1 }, context)).rejects.toThrow()
+  })
+
+  it('accepts a sandbox positionally (binding-only API)', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'bash-sandbox-test-'))
+    const sandboxBash = makeBash(new TestSandbox(workDir))
+    const agent = createMockAgent()
+    const context: ToolContext = {
+      toolUse: { name: 'bash', toolUseId: 'test-id', input: {} },
+      agent,
+      invocationState: {},
+      interrupt: () => {
+        throw new Error('interrupt not available in mock context')
+      },
+    }
+    const result = await sandboxBash.invoke({ command: 'echo "positional"' }, context)
+    expect((result as BashOutput).output).toContain('positional')
+  })
+
+  it('composes with customizeTool for description overrides', async () => {
+    const workDir = mkdtempSync(join(tmpdir(), 'bash-sandbox-test-'))
+    const customized = customizeTool(makeBash(new TestSandbox(workDir)), {
+      description: 'Custom sandbox bash description.',
+    })
+    expect(customized.name).toBe('bash')
+    expect(customized.description).toBe('Custom sandbox bash description.')
+    expect(customized.toolSpec.description).toBe('Custom sandbox bash description.')
+
+    const agent = createMockAgent()
+    const context: ToolContext = {
+      toolUse: { name: 'bash', toolUseId: 'test-id', input: {} },
+      agent,
+      invocationState: {},
+      interrupt: () => {
+        throw new Error('interrupt not available in mock context')
+      },
+    }
+    const result = await customized.invoke({ command: 'echo "customized"' }, context)
+    expect((result as BashOutput).output).toContain('customized')
+  })
+})
+
+describe.skipIf(process.platform === 'win32')('customizeTool(bash) — host singleton (agent-dev story)', () => {
+  const createContextForAgent = (name: string): ToolContext => {
+    const agent = createMockAgent()
+    return {
+      toolUse: { name, toolUseId: 'test-id', input: {} },
+      agent,
+      invocationState: {},
+      interrupt: () => {
+        throw new Error('interrupt not available in mock context')
+      },
+    }
+  }
+
+  it('customizes the host bash singleton without touching its privates', async () => {
+    const myBash = customizeTool(bash, { description: 'Executes bash. Prefer pipes over temp files.' })
+
+    expect(myBash.description).toBe('Executes bash. Prefer pipes over temp files.')
+    expect(myBash.toolSpec.description).toBe('Executes bash. Prefer pipes over temp files.')
+    // Original singleton untouched
+    expect(bash.description).not.toBe('Executes bash. Prefer pipes over temp files.')
+    // Schema passes through unchanged — validation and spec stay in lockstep
+    expect(myBash.toolSpec.inputSchema).toEqual(bash.toolSpec.inputSchema)
+
+    const context = createContextForAgent('bash')
+    const result = await myBash.invoke({ mode: 'execute', command: 'echo "wrapped"' }, context)
+    expect((result as BashOutput).output).toContain('wrapped')
+  })
+
+  it('shares the per-agent session with the original singleton (delegation, not clone)', async () => {
+    const myBash = customizeTool(bash, { description: 'Customized bash.' })
+    const context = createContextForAgent('bash')
+
+    // Set a variable through the ORIGINAL singleton...
+    await bash.invoke({ mode: 'execute', command: 'SHARED_SESSION_VAR="visible"' }, context)
+    // ...and read it through the WRAPPER on the same agent: sessions are
+    // keyed by agent (WeakMap in bash.ts), so the wrapper shares it.
+    const result = await myBash.invoke({ mode: 'execute', command: 'echo "${SHARED_SESSION_VAR:-empty}"' }, context)
+
+    expect((result as BashOutput).output.trim()).toBe('visible')
   })
 })
