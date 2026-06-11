@@ -1,4 +1,6 @@
 import { tool } from '../../tools/tool-factory.js'
+import type { InvokableTool } from '../../tools/tool.js'
+import type { ToolSpecOverrides } from '../../tools/types.js'
 import { z } from 'zod'
 import { Buffer } from 'buffer'
 import type { Sandbox } from '../../sandbox/base.js'
@@ -53,25 +55,89 @@ const fileEditorInputSchema = z.object({
 export const DEFAULT_FILE_EDITOR_DESCRIPTION =
   'Filesystem editor tool for viewing, creating, and editing files. Supports view (with line ranges), create, str_replace, and insert operations. Files must use absolute paths.'
 
-export interface MakeFileEditorOptions {
-  sandbox?: Sandbox
-  name?: string
-  description?: string
+/**
+ * Input contract for the file editor tool.
+ *
+ * Custom `inputSchema` overrides passed to {@link makeFileEditor} must *parse
+ * to* a type assignable to this shape — these are the only fields the callback
+ * reads, so any extra fields produced by a custom schema are accepted and
+ * ignored. This is enforced at compile time via the `TSchema` bound on
+ * {@link makeFileEditor}.
+ */
+export interface FileEditorToolInput {
+  /** The operation to perform. */
+  command: 'view' | 'create' | 'str_replace' | 'insert'
+  /** Absolute path to the file or directory. */
+  path: string
+  /** Content for new file (required for create command). */
+  file_text?: string | undefined
+  /** Line range to view [start, end]. 1-indexed. End can be -1 for end of file. */
+  view_range?: [number, number] | undefined
+  /** Exact string to find and replace (required for str_replace command). */
+  old_str?: string | undefined
+  /** Replacement string (for str_replace and insert commands). */
+  new_str?: string | undefined
+  /** Line number where text should be inserted (0-indexed, required for insert command). */
+  insert_line?: number | undefined
 }
 
 /**
- * Create a file editor tool. If a sandbox is provided, it's bound at creation time.
- * Otherwise, the tool reads from `context.agent.sandbox` at call time.
- * Used by sandbox implementations in `getTools()` and by users who want a customized file editor.
+ * Execution-binding options for {@link makeFileEditor}.
+ *
+ * Kept separate from {@link ToolSpecOverrides} to make the two concerns of the
+ * factory explicit: *where file I/O happens* (this interface) vs *what the
+ * model sees* (the overrides).
  */
-export function makeFileEditor(options: MakeFileEditorOptions = {}): ReturnType<typeof tool> {
-  return tool({
+export interface FileEditorBindingOptions {
+  /**
+   * Sandbox bound at tool-creation time. If omitted, the tool resolves
+   * `context.agent.sandbox` at call time instead.
+   */
+  sandbox?: Sandbox
+}
+
+/**
+ * Options for {@link makeFileEditor}: execution binding plus the SDK-wide
+ * {@link ToolSpecOverrides} convention, as a single flat bag.
+ *
+ * @typeParam TSchema - Type of the `inputSchema` override. Must parse to a
+ *   {@link FileEditorToolInput}-compatible output.
+ */
+export type MakeFileEditorOptions<TSchema extends z.ZodType<FileEditorToolInput> = z.ZodType<FileEditorToolInput>> =
+  FileEditorBindingOptions & ToolSpecOverrides<TSchema>
+
+/**
+ * Create a file editor tool. If a sandbox is provided, it's bound at creation
+ * time. Otherwise, the tool reads from `context.agent.sandbox` at call time.
+ * Used by sandbox implementations in `getTools()` and by users who want a
+ * customized file editor.
+ *
+ * A custom `inputSchema` replaces both the model-facing JSON schema and the
+ * runtime validation. Its parsed output must satisfy
+ * {@link FileEditorToolInput} (compile-time enforced); extra parsed fields are
+ * ignored by the callback.
+ *
+ * @example
+ * ```typescript
+ * const editor = makeFileEditor({
+ *   sandbox: mySandbox,
+ *   description: `${DEFAULT_FILE_EDITOR_DESCRIPTION} Files live in the build container.`,
+ * })
+ * ```
+ */
+export function makeFileEditor<TSchema extends z.ZodType<FileEditorToolInput> = typeof fileEditorInputSchema>(
+  options: MakeFileEditorOptions<TSchema> = {}
+): InvokableTool<z.output<TSchema>, string> {
+  const inputSchema: z.ZodType<FileEditorToolInput> = options.inputSchema ?? fileEditorInputSchema
+  const boundSandbox = options.sandbox
+
+  const built = tool({
     name: options.name ?? 'fileEditor',
     description: options.description ?? DEFAULT_FILE_EDITOR_DESCRIPTION,
-    inputSchema: fileEditorInputSchema,
-    callback: async (input, context) => {
+    inputSchema,
+    callback: async (input, context): Promise<string> => {
       if (!context) throw new Error('Tool context is required for fileEditor operations')
-      const sandbox = options.sandbox ?? context.agent.sandbox
+      const sandbox = boundSandbox ?? context.agent.sandbox
       const filePath = input.path.replace(/[/\\]+$/, '')
 
       switch (input.command) {
@@ -84,38 +150,23 @@ export function makeFileEditor(options: MakeFileEditorOptions = {}): ReturnType<
         case 'insert':
           return handleInsert(sandbox, filePath, input.insert_line!, input.new_str!)
         default:
-          throw new Error(`Unknown command: ${input.command}`)
+          throw new Error(`Unknown command: ${String(input.command)}`)
       }
     },
   })
+
+  // Safe narrowing: runtime validation uses the custom schema, whose output is
+  // assignable to FileEditorToolInput by the TSchema bound above.
+  return built as InvokableTool<z.output<TSchema>, string>
 }
 
 /**
  * Default file editor tool. Reads the sandbox from the agent's context at call time.
+ *
+ * To customize the name, description, input schema, or bind a specific
+ * sandbox, create your own instance with {@link makeFileEditor}.
  */
-export const fileEditor = tool({
-  name: 'fileEditor',
-  description: DEFAULT_FILE_EDITOR_DESCRIPTION,
-  inputSchema: fileEditorInputSchema,
-  callback: async (input, context) => {
-    if (!context) throw new Error('Tool context is required for fileEditor operations')
-    const sandbox = context.agent.sandbox
-    const filePath = input.path.replace(/[/\\]+$/, '')
-
-    switch (input.command) {
-      case 'view':
-        return handleView(sandbox, filePath, input.view_range)
-      case 'create':
-        return handleCreate(sandbox, filePath, input.file_text!)
-      case 'str_replace':
-        return handleStrReplace(sandbox, filePath, input.old_str!, input.new_str)
-      case 'insert':
-        return handleInsert(sandbox, filePath, input.insert_line!, input.new_str!)
-      default:
-        throw new Error(`Unknown command: ${input.command}`)
-    }
-  },
-})
+export const fileEditor = makeFileEditor()
 
 /**
  * Validates that a path is absolute and doesn't contain directory traversal.

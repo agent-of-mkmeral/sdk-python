@@ -83,6 +83,8 @@ export class DockerSandbox extends PosixShellSandbox {
 
   override getTools(): Tool[] {
     const cwd = this.workingDir ? ` Working directory: ${this.workingDir}.` : ''
+    // Factory convention: `sandbox` is the execution binding; the remaining
+    // fields are ToolSpecOverrides (model-facing metadata).
     return [
       makeFileEditor({
         sandbox: this,

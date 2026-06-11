@@ -156,6 +156,8 @@ export class SshSandbox extends PosixShellSandbox {
   }
 
   override getTools(): Tool[] {
+    // Factory convention: `sandbox` is the execution binding; the remaining
+    // fields are ToolSpecOverrides (model-facing metadata).
     return [
       makeFileEditor({
         sandbox: this,

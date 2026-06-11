@@ -1,4 +1,6 @@
 import { tool } from '../../tools/tool-factory.js'
+import type { InvokableTool } from '../../tools/tool.js'
+import type { ToolSpecOverrides } from '../../tools/types.js'
 import { z } from 'zod'
 import { spawn, type ChildProcess } from 'child_process'
 import { Buffer } from 'buffer'
@@ -12,6 +14,24 @@ const bashInputSchema = z.object({
   command: z.string().optional().describe('The bash command to execute (required when mode is "execute")'),
   timeout: z.number().positive().optional().describe('Timeout in seconds (default: 120, applies only to execute mode)'),
 })
+
+/**
+ * Input contract for the host bash tool.
+ *
+ * Custom `inputSchema` overrides passed to {@link makeHostBash} must *parse to*
+ * a type assignable to this shape — the callback only reads `mode`, `command`,
+ * and `timeout`, so any extra fields produced by a custom schema are accepted
+ * and ignored. This is enforced at compile time via the `TSchema` bound on
+ * {@link makeHostBash}.
+ */
+export interface HostBashToolInput {
+  /** Operation mode: `'execute'` to run a command, `'restart'` to restart the session. */
+  mode: 'execute' | 'restart'
+  /** The bash command to execute (required when mode is `'execute'`). */
+  command?: string | undefined
+  /** Timeout in seconds (default: 120, applies only to execute mode). */
+  timeout?: number | undefined
+}
 
 /**
  * Internal class for managing a bash session.
@@ -171,12 +191,6 @@ class BashSession {
 }
 
 /**
- * WeakMap to store bash sessions per agent instance.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const sessions = new WeakMap<any, BashSession>()
-
-/**
  * Track all active sessions for cleanup on process exit.
  */
 const activeSessions = new Set<BashSession>()
@@ -248,44 +262,104 @@ const DEFAULT_DESCRIPTION =
   'Commands persist state (variables, directory) within the session. Node.js only.'
 
 /**
+ * Options for {@link makeHostBash}: the SDK-wide {@link ToolSpecOverrides}
+ * convention. The host bash tool has no execution binding — it always spawns
+ * bash on the local machine — so unlike `makeBash` there is no `sandbox` field.
+ *
+ * @typeParam TSchema - Type of the `inputSchema` override. Must parse to a
+ *   {@link HostBashToolInput}-compatible output.
+ */
+export type MakeHostBashOptions<TSchema extends z.ZodType<HostBashToolInput> = z.ZodType<HostBashToolInput>> =
+  ToolSpecOverrides<TSchema>
+
+/**
+ * Create a *persistent host-session* bash tool (Node.js only).
+ *
+ * Each tool created by this factory maintains its own session per agent: state
+ * (variables, working directory) persists across calls within that session,
+ * and two host bash tools created with different names on the same agent get
+ * independent sessions. The exported {@link bash} singleton is
+ * `makeHostBash()`.
+ *
+ * For the *stateless, sandbox-routed* variant, see `makeBash` in
+ * `./make-bash.js` — it is browser-bundle-safe and accepts a `sandbox` binding;
+ * this factory is not and does not.
+ *
+ * A custom `inputSchema` replaces both the model-facing JSON schema and the
+ * runtime validation. Its parsed output must satisfy {@link HostBashToolInput}
+ * (compile-time enforced); extra parsed fields are ignored by the callback.
+ *
+ * **Security Warning**: tools from this factory execute arbitrary bash
+ * commands on the host without sandboxing.
+ *
+ * @example
+ * ```typescript
+ * const buildShell = makeHostBash({
+ *   name: 'buildShell',
+ *   description: 'Persistent shell for build commands. cd into the repo first.',
+ * })
+ * const agent = new Agent({ tools: [buildShell] })
+ * ```
+ */
+export function makeHostBash<TSchema extends z.ZodType<HostBashToolInput> = typeof bashInputSchema>(
+  options: MakeHostBashOptions<TSchema> = {}
+): InvokableTool<z.output<TSchema>, BashOutput | string> {
+  const inputSchema: z.ZodType<HostBashToolInput> = options.inputSchema ?? bashInputSchema
+
+  // Per-factory-instance session store: each created tool keeps its own
+  // session per agent, so differently-named host bash tools don't share state.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sessions = new WeakMap<any, BashSession>()
+
+  const built = tool({
+    name: options.name ?? 'bash',
+    description: options.description ?? DEFAULT_DESCRIPTION,
+    inputSchema,
+    callback: async (input, context): Promise<BashOutput | string> => {
+      if (!context) {
+        throw new Error('Tool context is required for bash operations')
+      }
+
+      const agent = context.agent
+
+      if (input.mode === 'execute' && !input.command) {
+        throw new Error('command is required when mode is "execute"')
+      }
+
+      if (input.mode === 'restart') {
+        const existingSession = sessions.get(agent)
+        if (existingSession) {
+          existingSession.stop()
+          sessions.delete(agent)
+        }
+        const newSession = new BashSession(120)
+        sessions.set(agent, newSession)
+        sessionFinalizer.register(agent, newSession)
+        return 'Bash session restarted'
+      }
+
+      let session = sessions.get(agent)
+      if (!session) {
+        session = new BashSession(input.timeout ?? 120)
+        sessions.set(agent, session)
+        sessionFinalizer.register(agent, session)
+      }
+
+      return session.run(input.command!, input.timeout)
+    },
+  })
+
+  // Safe narrowing: runtime validation uses the custom schema, whose output is
+  // assignable to HostBashToolInput by the TSchema bound above.
+  return built as InvokableTool<z.output<TSchema>, BashOutput | string>
+}
+
+/**
  * Host-only bash tool with a persistent session across calls.
  * State (variables, working directory) persists within the session.
  * Node.js only.
+ *
+ * To customize the name, description, or input schema, create your own
+ * instance with {@link makeHostBash}.
  */
-export const bash = tool({
-  name: 'bash',
-  description: DEFAULT_DESCRIPTION,
-  inputSchema: bashInputSchema,
-  callback: async (input, context) => {
-    if (!context) {
-      throw new Error('Tool context is required for bash operations')
-    }
-
-    const agent = context.agent
-
-    if (input.mode === 'execute' && !input.command) {
-      throw new Error('command is required when mode is "execute"')
-    }
-
-    if (input.mode === 'restart') {
-      const existingSession = sessions.get(agent)
-      if (existingSession) {
-        existingSession.stop()
-        sessions.delete(agent)
-      }
-      const newSession = new BashSession(120)
-      sessions.set(agent, newSession)
-      sessionFinalizer.register(agent, newSession)
-      return 'Bash session restarted'
-    }
-
-    let session = sessions.get(agent)
-    if (!session) {
-      session = new BashSession(input.timeout ?? 120)
-      sessions.set(agent, session)
-      sessionFinalizer.register(agent, session)
-    }
-
-    return session.run(input.command!, input.timeout)
-  },
-})
+export const bash = makeHostBash()
