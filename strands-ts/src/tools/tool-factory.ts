@@ -3,7 +3,7 @@ import { FunctionTool } from './function-tool.js'
 import type { FunctionToolConfig } from './function-tool.js'
 import type { JSONValue } from '../types/json.js'
 import { z } from 'zod'
-import { ZodTool, type ZodToolConfig } from './zod-tool.js'
+import { ZodTool, type ToolCustomConfig, type ZodToolConfig } from './zod-tool.js'
 
 /**
  * Checks whether a value is a Zod schema type.
@@ -16,16 +16,23 @@ function isZodType(value: unknown): value is z.ZodType {
 }
 
 /**
- * Creates an InvokableTool from a Zod schema and callback function.
+ * Creates a ZodTool from a Zod schema and callback function.
+ *
+ * The returned tool supports `clone()` for deriving customized variants
+ * (metadata overrides and, for tools that declare a `config` object,
+ * configuration overrides).
  *
  * @typeParam TInput - Zod schema type for input validation
  * @typeParam TReturn - Return type of the callback function
+ * @typeParam TConfig - Tool-specific configuration type (see ZodToolConfig.config)
  * @param config - Tool configuration with Zod schema
- * @returns An InvokableTool with typed input and output
+ * @returns A ZodTool with typed input, output, and configuration
  */
-export function tool<TInput extends z.ZodType, TReturn extends JSONValue = JSONValue>(
-  config: ZodToolConfig<TInput, TReturn>
-): InvokableTool<z.infer<TInput>, TReturn>
+export function tool<
+  TInput extends z.ZodType,
+  TReturn extends JSONValue = JSONValue,
+  TConfig extends ToolCustomConfig = Record<never, never>,
+>(config: ZodToolConfig<TInput, TReturn, TConfig>): ZodTool<TInput, TReturn, TConfig>
 
 /**
  * Creates an InvokableTool from a JSON schema and callback function.
@@ -55,6 +62,9 @@ export function tool(config: FunctionToolConfig): InvokableTool<unknown, JSONVal
  *   callback: (input) => input.a + input.b,
  * })
  *
+ * // Derive a customized variant — same callback, new metadata:
+ * const adder = calculator.clone({ name: 'adder', description: 'Adds two integers' })
+ *
  * // With JSON schema (untyped, no validation)
  * const greeter = tool({
  *   name: 'greeter',
@@ -72,10 +82,10 @@ export function tool(config: FunctionToolConfig): InvokableTool<unknown, JSONVal
  * @returns An InvokableTool that implements the Tool interface with invoke() method
  */
 export function tool(
-  config: ZodToolConfig<z.ZodType | undefined, JSONValue> | FunctionToolConfig
+  config: ZodToolConfig<z.ZodType | undefined, JSONValue, ToolCustomConfig> | FunctionToolConfig
 ): InvokableTool<unknown, JSONValue> {
   if (config.inputSchema && isZodType(config.inputSchema)) {
-    return new ZodTool(config as ZodToolConfig<z.ZodType, JSONValue>)
+    return new ZodTool(config as ZodToolConfig<z.ZodType, JSONValue, ToolCustomConfig>)
   }
 
   return new FunctionTool(config as FunctionToolConfig)
