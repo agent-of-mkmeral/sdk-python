@@ -136,7 +136,7 @@ export type { FunctionToolConfig, FunctionToolCallback } from './tools/function-
 
 // ZodTool implementation
 export { ZodTool } from './tools/zod-tool.js'
-export type { ZodToolConfig } from './tools/zod-tool.js'
+export type { ZodToolConfig, ZodToolCloneOverrides, ToolCustomConfig } from './tools/zod-tool.js'
 
 // Tool factory function
 export { tool } from './tools/tool-factory.js'

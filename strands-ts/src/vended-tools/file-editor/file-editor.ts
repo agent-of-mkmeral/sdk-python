@@ -53,53 +53,39 @@ const fileEditorInputSchema = z.object({
 export const DEFAULT_FILE_EDITOR_DESCRIPTION =
   'Filesystem editor tool for viewing, creating, and editing files. Supports view (with line ranges), create, str_replace, and insert operations. Files must use absolute paths.'
 
-export interface MakeFileEditorOptions {
-  sandbox?: Sandbox
-  name?: string
-  description?: string
-}
-
 /**
- * Create a file editor tool. If a sandbox is provided, it's bound at creation time.
- * Otherwise, the tool reads from `context.agent.sandbox` at call time.
- * Used by sandbox implementations in `getTools()` and by users who want a customized file editor.
+ * Configuration surface of {@link fileEditor}, overridable via `clone()`.
  */
-export function makeFileEditor(options: MakeFileEditorOptions = {}): ReturnType<typeof tool> {
-  return tool({
-    name: options.name ?? 'fileEditor',
-    description: options.description ?? DEFAULT_FILE_EDITOR_DESCRIPTION,
-    inputSchema: fileEditorInputSchema,
-    callback: async (input, context) => {
-      if (!context) throw new Error('Tool context is required for fileEditor operations')
-      const sandbox = options.sandbox ?? context.agent.sandbox
-      const filePath = input.path.replace(/[/\\]+$/, '')
-
-      switch (input.command) {
-        case 'view':
-          return handleView(sandbox, filePath, input.view_range)
-        case 'create':
-          return handleCreate(sandbox, filePath, input.file_text!)
-        case 'str_replace':
-          return handleStrReplace(sandbox, filePath, input.old_str!, input.new_str)
-        case 'insert':
-          return handleInsert(sandbox, filePath, input.insert_line!, input.new_str!)
-        default:
-          throw new Error(`Unknown command: ${input.command}`)
-      }
-    },
-  })
+export interface FileEditorConfig {
+  /**
+   * The sandbox file I/O is routed to. When unset, the tool reads
+   * `context.agent.sandbox` at call time.
+   */
+  sandbox?: Sandbox
 }
 
 /**
  * Default file editor tool. Reads the sandbox from the agent's context at call time.
+ *
+ * Use `clone()` to bind it to a specific sandbox and/or customize its
+ * metadata — this is what sandbox implementations do in `getTools()`:
+ *
+ * @example
+ * ```typescript
+ * const dockerEditor = fileEditor.clone({
+ *   sandbox: dockerSandbox,
+ *   description: `${DEFAULT_FILE_EDITOR_DESCRIPTION} Files are in Docker container "app".`,
+ * })
+ * ```
  */
 export const fileEditor = tool({
   name: 'fileEditor',
   description: DEFAULT_FILE_EDITOR_DESCRIPTION,
   inputSchema: fileEditorInputSchema,
-  callback: async (input, context) => {
+  config: {} as FileEditorConfig,
+  callback: async (input, context, config) => {
     if (!context) throw new Error('Tool context is required for fileEditor operations')
-    const sandbox = context.agent.sandbox
+    const sandbox = config?.sandbox ?? context.agent.sandbox
     const filePath = input.path.replace(/[/\\]+$/, '')
 
     switch (input.command) {
@@ -116,6 +102,32 @@ export const fileEditor = tool({
     }
   },
 })
+
+/**
+ * Options accepted by the deprecated {@link makeFileEditor} factory.
+ *
+ * @deprecated Use `fileEditor.clone({ sandbox, name, description })` instead.
+ */
+export interface MakeFileEditorOptions {
+  sandbox?: Sandbox
+  name?: string
+  description?: string
+}
+
+/**
+ * Create a file editor tool.
+ *
+ * @deprecated Use `fileEditor.clone({ sandbox, name, description })` instead.
+ * This factory is a thin wrapper over `fileEditor.clone()` kept for backwards
+ * compatibility and will be removed in a future release.
+ */
+export function makeFileEditor(options: MakeFileEditorOptions = {}): typeof fileEditor {
+  return fileEditor.clone({
+    ...(options.sandbox !== undefined && { sandbox: options.sandbox }),
+    ...(options.name !== undefined && { name: options.name }),
+    ...(options.description !== undefined && { description: options.description }),
+  })
+}
 
 /**
  * Validates that a path is absolute and doesn't contain directory traversal.
