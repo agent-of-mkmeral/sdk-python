@@ -18,17 +18,17 @@
 
 We want `use_agent` — model-driven delegation, where the model can shape the child's instructions, tools, and model at call time — in the SDK as a vended tool. `Agent.as_tool()` stays as the primitive for developer-authored children; this covers the model-authored side. [#3392](https://github.com/strands-agents/harness-sdk/pull/3392) is a first cut and is parked pending this design.
 
-A straight port of `strands_tools.use_agent` is not the answer. Three problems have to be fixed on the way in, and two of them are SDK problems, not tool problems.
+A straight port of `strands_tools.use_agent` is not the answer. Three problems have to be fixed on the way in.
 
 ## Problem
 
-**1. One fixed parameter list cannot serve every harness.** A regulated harness wants the child's prompt and tools fixed and reviewed, with the model supplying only the task. A coding harness wants named roles the model picks from. A research harness wants ad-hoc roles, a model-tier choice, and some forked context. Whatever fixed list we vend, someone forks a semver-bound tool to add or remove a parameter.
+**1. One fixed parameter list cannot serve every harness.** A regulated harness wants the child's prompt and tools fixed and reviewed; a coding harness wants named roles; a research harness wants ad-hoc roles and a model-tier choice. Whatever fixed list we vend, someone forks a semver-bound tool to change it.
 
-**2. The result has no contract.** Every delegation path — `_agent_as_tool.py`, `strands_tools.use_agent`, #3392 — returns `str(result)`: interrupts, else structured output, else the text of the child's *final message*, plus (in the tools-repo version) a metrics dump as prose. There is no declared shape, no machine-readable usage, and no handle to the child, so anything the parent needs beyond the final text — a structured report, token accounting, a way to follow up — has no place to live. One known edge case that falls out of "final message only": a plugin that re-invokes the child (e.g. `GoalLoop`) makes the final message a follow-up rather than the deliverable; v1 treats that as an edge case (a warning plus `result_model`, below), with configurable extraction as future work.
+**2. The result has no contract.** Every delegation path returns `str(result)` — the text of the child's *final message* — with no declared shape, no machine-readable usage, and no handle to the child. (One known edge case: a plugin that re-invokes the child, e.g. `GoalLoop`, makes the final message a follow-up rather than the deliverable. v1 treats this as an edge case; configurable extraction is future work.)
 
-**3. The child is not a member of the harness.** `strands_tools.use_agent` and #3392 both construct a bare `Agent(...)` — no sandbox, no interventions, no skills. In a harness that gates `shell` in `BeforeToolCall`, delegation is a structural bypass of the gate. Every implementation that got this right (both of our internal harnesses, Codex) builds the child through the same construction path as the parent.
+**3. The child is not a member of the harness.** `strands_tools.use_agent` and #3392 both construct a bare `Agent(...)` — no sandbox, no interventions, no skills. In a harness that gates `shell` in `BeforeToolCall`, delegation is a structural bypass of the gate.
 
-Two smaller points. Both tools are one blocking call returning text with no handle, so adding wait/resume/cancel later is a breaking change to a vended tool. And the tools-repo `use_agent` carries defects that must not be ported — `model_provider`/`model_settings` as a credential-injection surface, silent fallback to the parent's model, synchronous invocation, a metrics dump in the parent's context ([Appendix C](#appendix-c); #3392 already cuts most of them).
+Two smaller points: a blocking call with no handle makes wait/resume/cancel a breaking change later; and the tools-repo `use_agent` carries defects that must not be ported ([Appendix B](#appendix-b); #3392 already cuts most of them).
 
 ## Goals and Non-Goals
 
@@ -51,13 +51,91 @@ Non-Goals (v1): background execution, parallel fan-out (that's `swarm`/`graph`, 
 | [Google ADK](https://github.com/google/adk-python) `AgentTool` | Developer | Derived from child's input schema | `skip_summarization` toggle |
 | `strands_tools.use_agent` | **Model** | `prompt`, `system_prompt`, `tools`, `model_provider`, `model_settings` | Response + model id + metrics, as text |
 
-Three takeaways. **Named developer-authored roles won everywhere**; model-authored system prompts are at most a secondary path. **Everyone has an extraction knob except us** — and Codex's current protocol goes furthest: `wait_agent` returns no content at all, only which children have updates. **Codex derives the spawn tool's schema from configuration**, literally `properties.remove("model")` per option flags ([Appendix B](#appendix-b)) — which settles that problem 1 is solvable with a shipping mechanism, not a research idea. Our own `make_sleep(max_duration=...)` already derives the *description* from config; this extends that to parameters. Extended matrix in [Appendix D](#appendix-d).
+Three takeaways. **Named developer-authored roles won everywhere**; model-authored system prompts are at most a secondary path. **Everyone has an extraction knob except us** — and Codex's current protocol goes furthest: `wait_agent` returns no content at all, only which children have updates. **Codex derives the spawn tool's schema from configuration**, literally `properties.remove("model")` per option flags ([Appendix A](#appendix-a)) — which settles that problem 1 is solvable with a shipping mechanism, not a research idea. Our own `make_sleep(max_duration=...)` already derives the *description* from config; this extends that to parameters. Extended matrix in [Appendix C](#appendix-c).
 
 ## Proposal
 
 ### Recommended: a factory whose tool schema follows its configuration
 
-Vend `make_use_agent(...)` plus a pre-configured `use_agent` default instance, per the vended-tool convention. The new part: configuration determines *which parameters exist*. A subagent needs four things decided — instructions, tools, model, context — and for each the developer says who decides it (run-wide limits are plain keyword arguments, below):
+Everyone knows today's `use_agent`: one fixed parameter list — `prompt`, `system_prompt`, `tools`, `model_provider`, `model_settings` — take it or fork it. This proposal keeps the tool but makes it a factory: `make_use_agent(...)` returns the tool, and the configuration decides **which parameters the model sees**. A pre-configured `use_agent` default instance ships alongside, per the vended-tool convention. The whole surface:
+
+```python
+def make_use_agent(
+    *,
+    # Axes: who decides each part of the child. Each contributes zero or one
+    # model-facing parameter to the tool schema.
+    instructions: Open | Choice | Fixed = Open(max_bytes=8 * 1024),
+    tools: Narrow | Choice | Fixed | Inherit = Narrow(),
+    model: Inherit | Choice | Fixed = Inherit(),
+    context: Fixed | Choice = Fixed("none"),          # "none" | "all" | int turns
+
+    # Named roles the model picks from; adds an `agent_type` enum parameter.
+    presets: Mapping[str, Preset] | Sequence[Skill] | Path | None = None,
+
+    # How the child is constructed — the harness-membership hook.
+    builder: AgentBuilder | None = None,
+
+    # What comes back.
+    result_model: type[BaseModel] | None = None,
+    max_output_bytes: int = 8 * 1024,
+
+    # Per-run limits.
+    max_depth: int = 3,
+    max_children: int = 12,
+    wall_clock_s: float = 300.0,
+    max_task_bytes: int = 32 * 1024,
+
+    # Lifecycle (reserved in v1; see Future Work).
+    allow_resume: bool = False,
+    allow_define: bool = False,
+
+    name: str = "use_agent",
+    description: str | None = None,
+) -> DecoratedFunctionTool: ...
+
+
+use_agent = make_use_agent()      # vended default; ≈ #3392's surface
+```
+
+Supporting types:
+
+```python
+class Open:    max_bytes: int                                # model writes the value freely
+class Choice:  options: Sequence[str | int] | ModelRouter    # model picks from a set
+class Narrow:  allow: Sequence[str] | None = None            # model may only remove; None = parent's tools
+class Fixed:   value: Any                                    # developer decides; no parameter
+class Inherit: pass                                          # parent's live value; no parameter
+
+@dataclass(frozen=True)
+class Preset:
+    instructions: str | None = None
+    tools: Sequence[str] | None = None
+    model: str | Model | None = None
+    context: str | int | None = None                  # "none" | "all" | int turns
+    result_model: type[BaseModel] | None = None
+    description: str = ""
+
+@dataclass(frozen=True)
+class AgentSpec:
+    """A fully resolved request for a child agent. Configuration plus the model's arguments."""
+    task: str | list[ContentBlock]
+    instructions: str | None
+    tools: Sequence[str]
+    model: Model | None
+    context: str | int
+    result_model: type[BaseModel] | None
+    preset_name: str | None
+    depth: int
+
+class AgentBuilder(Protocol):
+    def __call__(self, spec: AgentSpec, *, parent: Agent) -> Agent: ...
+```
+
+The rest of this section walks the signature, parameter by parameter.
+
+#### The axes: `instructions`, `tools`, `model`, `context`
+
+A subagent needs four things decided — instructions, tools, model, context — and for each the developer says *who* decides it:
 
 | Authority | Meaning | Effect on the tool schema |
 |---|---|---|
@@ -67,7 +145,9 @@ Vend `make_use_agent(...)` plus a pre-configured `use_agent` default instance, p
 | `Fixed(value)` | Developer decides | No parameter |
 | `Inherit()` | Take the parent's value | No parameter |
 
-`Narrow` is the only mode safe by construction — a child can never gain a capability the parent lacked (opencode enforces the same property by deriving child permissions from the parent's, then adding denies); its allow-list is re-validated against the parent's *live* tool set at call time, so a tool the parent has since lost is an error, not a grant. `Fixed` and `Inherit` both remove the parameter but are not redundant: `Fixed` supplies a literal, `Inherit` tracks the parent's *live* value — its currently routed model, its current tool set. Not every mode applies to every axis (`instructions` cannot be `Narrow`ed or `Inherit`ed; `tools` cannot be `Open`, a child never gets tools the parent lacks); the legal combinations are the type hints in [Appendix A](#appendix-a), and illegal ones raise `ValueError` at factory time. The regulated harness and the research harness are now the same code path with different `inputSchema`s, and the developer can print the schema to see exactly what the model was handed:
+`Narrow` is the only mode safe by construction — a child can never gain a capability the parent lacked (opencode enforces the same property by deriving child permissions from the parent's, then adding denies); its allow-list is re-validated against the parent's *live* tool set at call time, so a tool the parent has since lost is an error, not a grant. `Fixed` and `Inherit` both remove the parameter but are not redundant: `Fixed` supplies a literal, `Inherit` tracks the parent's *live* value — its currently routed model, its current tool set. Not every mode applies to every axis (`instructions` cannot be `Narrow`ed or `Inherit`ed; `tools` cannot be `Open`, a child never gets tools the parent lacks); the legal combinations are the type hints above, and illegal ones raise `ValueError` at factory time.
+
+The consequence: the regulated harness and the research harness are the same code path with different `inputSchema`s, and the developer can print the schema to see exactly what the model was handed:
 
 ```python
 from strands.vended_tools.use_agent import make_use_agent, Fixed, Choice, Open, Narrow, Inherit
@@ -83,20 +163,41 @@ sorted(locked.tool_spec["inputSchema"]["json"]["properties"])
 # ['agent_type', 'task']
 ```
 
-Full signature in [Appendix A](#appendix-a). Five parts complete the design:
+The `context` axis deserves one note: it takes `"none" | "all" | N` turns (Codex's `fork_turns`), replacing `as_tool`'s boolean and `use_agent`'s implicit always-none. A reviewer that sees the last three turns beats one re-briefed in prose; a researcher should start clean. Like the other axes it can be fixed or offered to the model — but `"all"` forks the entire parent transcript (tool results included) into the child, so it is not offered in any vended default or example until its interaction with conversation managers and secret hygiene is traced (see Consequences).
 
-**Named presets.** A `Preset` is a partially applied configuration — instructions, tools, model, result contract — registered under a name; passed as a mapping, a directory of definition files, or `Skill` objects. When presets exist, the tool gains an `agent_type` enum and the description lists each role. Precedence is fixed: a field the preset defines is `Fixed` for that role — the axes govern only fields the preset leaves unset, the model's arguments are validated against whichever applies, and a preset's `result_model` overrides the factory-level one. Preset fields are developer-authored configuration, so a `Model` instance there is the developer's own — the credential-injection concern from Appendix C applies to model-facing parameters, never to preset contents. Definition files are skill-shaped, so one dialect describes both top-level and delegated agents (opencode's `mode: subagent | primary | all`). Ad-hoc `instructions=Open(...)` stays available and is the vended default, for continuity with today's `use_agent`.
+#### `presets`: named roles
 
-**Construction through an injected builder.** The tool resolves config plus the model's arguments into an `AgentSpec` and hands it to an `AgentBuilder`. The default builder is roughly #3392's body; a harness passes its own, and the child is built the way the parent was — same sandbox, same interventions, same skills. This is the fix for problem 3, and it is Codex's split too: discovery resolves the invocation, the runtime only starts it, the host injects the spawn capability.
+A `Preset` is a partially applied configuration — instructions, tools, model, result contract — registered under a name; passed as a mapping, a directory of definition files, or `Skill` objects. When presets exist, the tool gains an `agent_type` enum and the description lists each role. Precedence is fixed: a field the preset defines is `Fixed` for that role — the axes govern only fields the preset leaves unset, the model's arguments are validated against whichever applies, and a preset's `result_model` overrides the factory-level one. Preset fields are developer-authored configuration, so a `Model` instance there is the developer's own — the credential-injection concern from Appendix B applies to model-facing parameters, never to preset contents. Definition files are skill-shaped, so one dialect describes both top-level and delegated agents (opencode's `mode: subagent | primary | all`). Ad-hoc `instructions=Open(...)` stays available and is the vended default, for continuity with today's `use_agent`.
+
+#### `builder`: construction through injection
+
+The tool resolves config plus the model's arguments into an `AgentSpec` and hands it to an `AgentBuilder`. The default builder is roughly #3392's body; a harness passes its own, and the child is built the way the parent was — same sandbox, same interventions, same skills. This is the fix for problem 3, and it is Codex's split too: discovery resolves the invocation, the runtime only starts it, the host injects the spawn capability.
+
+An illustrative default builder (`cfg` is the factory's resolved configuration, closed over):
 
 ```python
-class AgentBuilder(Protocol):
-    def __call__(self, spec: AgentSpec, *, parent: Agent) -> Agent: ...
+def make_default_builder(cfg: UseAgentConfig) -> AgentBuilder:
+    def build(spec: AgentSpec, *, parent: Agent) -> Agent:
+        tools = [parent.tool_registry.registry[n] for n in spec.tools]
+        if spec.depth >= cfg.max_depth - 1:
+            tools = [t for t in tools if t.tool_name != cfg.name]   # structural depth limit
+        return Agent(
+            model=spec.model or parent.model,
+            system_prompt=spec.instructions,
+            tools=tools,
+            messages=fork_context(parent.messages, spec.context),
+            # no plugins, no sandbox: the default builder constructs a plain agent.
+            # Harness builders supply their own sandbox and hooks (see Consequences).
+            structured_output_model=spec.result_model,
+        )
+    return build
 ```
 
 The default builder does not copy the parent's plugins into the child; a harness builder decides what the child runs (filtered plugin inheritance is future work). And it does not silently weaken a guarded parent: when the parent has a sandbox or registered hooks that the default builder cannot carry over, the call fails with a configuration error telling the developer to supply a builder — otherwise delegation would be a structural bypass of exactly the gates problem 3 describes.
 
-**Declared output, not `str(result)`.** v1 keeps today's extraction — interrupts, else structured output, else the final message's text — with one addition: if the child ran more than one invocation (a plugin re-invoked it; the edge case from problem 2) the tool logs a loud warning. The stronger option is `result_model: type[BaseModel]`, which constructs the child with `structured_output_model=` — an existing `Agent` parameter — so the parent receives fields (`{summary, findings, files_changed, open_questions}`) instead of "whichever message was last". Opt-in per preset, since it constrains the child. A general `output_extractor` hook is future work, deferred so it lands once as a protocol shared with `as_tool`/`swarm`/`graph`; adding it later is purely additive. The tool's own result is declared via `outputSchema`:
+#### `result_model` and `max_output_bytes`: declared output, not `str(result)`
+
+v1 keeps today's extraction — interrupts, else structured output, else the final message's text — with one addition: if the child ran more than one invocation (a plugin re-invoked it; the edge case from problem 2) the tool logs a loud warning. The stronger option is `result_model: type[BaseModel]`, which constructs the child with `structured_output_model=` — an existing `Agent` parameter — so the parent receives fields (`{summary, findings, files_changed, open_questions}`) instead of "whichever message was last". Opt-in per preset, since it constrains the child. A general `output_extractor` hook is future work, deferred so it lands once as a protocol shared with `as_tool`/`swarm`/`graph`; adding it later is purely additive. The tool's own result is declared via `outputSchema`:
 
 ```python
 {"agent_id": str,           # handle, so wait/resume/cancel stay additive later
@@ -111,9 +212,13 @@ The default builder does not copy the parent's plugins into the child; a harness
 
 Two deliberate choices. Child interrupts are *not* a status: they propagate to the parent as `ToolInterruptEvent`, exactly as `Agent.as_tool` does today, so human-in-the-loop flows keep working through delegation. And the model id and metrics prose are absent — usage is a field and a trace attribute, not conversation content. (`outputSchema` is a declared contract; not every model provider enforces it.)
 
-**Context inheritance as a dial.** `context` takes `"none" | "all" | N` turns (Codex's `fork_turns`), replacing `as_tool`'s boolean and `use_agent`'s implicit always-none. A reviewer that sees the last three turns beats one re-briefed in prose; a researcher should start clean. As an axis it can be fixed or offered to the model like the others — but `"all"` forks the entire parent transcript (tool results included) into the child, so it is not offered in any vended default or example until its interaction with conversation managers and secret hygiene is traced (see Consequences).
+#### `max_depth`, `max_children`, `wall_clock_s`, `max_task_bytes`: per-run budgets, structural depth
 
-**Per-run budgets, structural depth.** `max_depth`, `max_children`, `wall_clock_s`, `max_task_bytes` are accounted per *run* — per-call caps are defeated by calling twice. A run is one top-level invocation of the parent agent; the account lives in the parent's invocation state, not in the factory or the module-level instance (which would silently share budgets across agents), it is updated atomically since tool calls can run concurrently, and multiple `use_agent` instances attached to one agent draw from the same account. Depth is structural: at the limit the child is built *without* the delegation tool, so recursion is impossible rather than discouraged (opencode's `childToolDenies` does the same) — the depth counter travels in the spec and is enforced by the tool itself, so it holds across every child this factory produces. Budget exhaustion returns `{"status": "failed", ...}` as a tool result, not an exception, so the model can adapt.
+These are accounted per *run* — per-call caps are defeated by calling twice. A run is one top-level invocation of the parent agent; the account lives in the parent's invocation state, not in the factory or the module-level instance (which would silently share budgets across agents), it is updated atomically since tool calls can run concurrently, and multiple `use_agent` instances attached to one agent draw from the same account. Depth is structural: at the limit the child is built *without* the delegation tool, so recursion is impossible rather than discouraged (opencode's `childToolDenies` does the same) — the depth counter travels in the spec and is enforced by the tool itself, so it holds across every child this factory produces. Budget exhaustion returns `{"status": "failed", ...}` as a tool result, not an exception, so the model can adapt.
+
+#### `allow_resume`, `allow_define`: reserved
+
+Both default to `False` and are inert in v1; they reserve the lifecycle seam (resume against the returned `agent_id`, runtime role registration) so enabling them later is additive. See Future Work.
 
 **Pros:**
 
@@ -318,105 +423,7 @@ Yes — phase 0 and v1, prototyped in an internal harness first.
 
 <a id="appendix-a"></a>
 <details>
-<summary><b>Appendix A: Full API surface</b></summary>
-
-```python
-def make_use_agent(
-    *,
-    # Axes. Each contributes zero or one model-facing parameter.
-    instructions: Open | Choice | Fixed = Open(max_bytes=8 * 1024),
-    tools: Narrow | Choice | Fixed | Inherit = Narrow(),
-    model: Inherit | Choice | Fixed = Inherit(),
-    context: Fixed | Choice = Fixed("none"),          # "none" | "all" | int turns
-
-    # Named roles.
-    presets: Mapping[str, Preset] | Sequence[Skill] | Path | None = None,
-
-    # Construction.
-    builder: AgentBuilder | None = None,
-
-    # What comes back.
-    result_model: type[BaseModel] | None = None,
-    max_output_bytes: int = 8 * 1024,
-
-    # Per-run limits.
-    max_depth: int = 3,
-    max_children: int = 12,
-    wall_clock_s: float = 300.0,
-    max_task_bytes: int = 32 * 1024,
-
-    # Lifecycle (reserved in v1; see Future Work).
-    allow_resume: bool = False,
-    allow_define: bool = False,
-
-    name: str = "use_agent",
-    description: str | None = None,
-) -> DecoratedFunctionTool: ...
-
-
-use_agent = make_use_agent()      # module-level default instance
-```
-
-Supporting types:
-
-```python
-class Open:    max_bytes: int
-class Choice:  options: Sequence[str | int] | ModelRouter
-class Narrow:  allow: Sequence[str] | None = None     # None means "the parent's tools"
-class Fixed:   value: Any
-class Inherit: pass
-
-@dataclass(frozen=True)
-class Preset:
-    instructions: str | None = None
-    tools: Sequence[str] | None = None
-    model: str | Model | None = None
-    context: str | int | None = None                  # "none" | "all" | int turns
-    result_model: type[BaseModel] | None = None
-    description: str = ""
-
-@dataclass(frozen=True)
-class AgentSpec:
-    """A fully resolved request for a child agent. Configuration plus the model's arguments."""
-    task: str | list[ContentBlock]
-    instructions: str | None
-    tools: Sequence[str]
-    model: Model | None
-    context: str | int
-    result_model: type[BaseModel] | None
-    preset_name: str | None
-    depth: int
-
-class AgentBuilder(Protocol):
-    def __call__(self, spec: AgentSpec, *, parent: Agent) -> Agent: ...
-
-```
-
-An illustrative default builder — this is roughly what #3392 already does (`cfg` is the factory's resolved configuration, closed over):
-
-```python
-def make_default_builder(cfg: UseAgentConfig) -> AgentBuilder:
-    def build(spec: AgentSpec, *, parent: Agent) -> Agent:
-        tools = [parent.tool_registry.registry[n] for n in spec.tools]
-        if spec.depth >= cfg.max_depth - 1:
-            tools = [t for t in tools if t.tool_name != cfg.name]   # structural depth limit
-        return Agent(
-            model=spec.model or parent.model,
-            system_prompt=spec.instructions,
-            tools=tools,
-            messages=fork_context(parent.messages, spec.context),
-            # no plugins, no sandbox: the default builder constructs a plain agent.
-            # Harness builders supply their own sandbox and hooks (see Consequences).
-            structured_output_model=spec.result_model,
-        )
-    return build
-```
-
-</details>
-
-<a id="appendix-b"></a>
-<details>
-<summary><b>Appendix B: How Codex derives its spawn schema from configuration</b></summary>
+<summary><b>Appendix A: How Codex derives its spawn schema from configuration</b></summary>
 
 From `codex-rs/core/src/tools/handlers/multi_agents_spec.rs` in [openai/codex](https://github.com/openai/codex):
 
@@ -454,9 +461,9 @@ Two hygiene details worth copying: Codex encrypts the child's task payload, and 
 
 </details>
 
-<a id="appendix-c"></a>
+<a id="appendix-b"></a>
 <details>
-<summary><b>Appendix C: What not to port from <code>strands_tools.use_agent</code></b></summary>
+<summary><b>Appendix B: What not to port from <code>strands_tools.use_agent</code></b></summary>
 
 For the record, since "bring `use_agent` to the SDK" should not mean porting this file. `strands-agents/tools/src/strands_tools/use_agent.py`, 289 lines:
 
@@ -471,9 +478,9 @@ Worth keeping: the idea of a per-call model choice (as a name, not a provider co
 
 </details>
 
-<a id="appendix-d"></a>
+<a id="appendix-c"></a>
 <details>
-<summary><b>Appendix D: Extended prior art</b></summary>
+<summary><b>Appendix C: Extended prior art</b></summary>
 
 ### Context inheritance and lifecycle
 
@@ -508,9 +515,9 @@ The other forwards the parent's full configuration into the child through an inj
 
 </details>
 
-<a id="appendix-e"></a>
+<a id="appendix-d"></a>
 <details>
-<summary><b>Appendix E: Sources and verification</b></summary>
+<summary><b>Appendix D: Sources and verification</b></summary>
 
 **Verified against `harness-sdk` at `main` while writing this document:**
 
