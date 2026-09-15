@@ -2219,6 +2219,7 @@ describe('AnthropicModel', () => {
     it.each([{ any: {} }, { tool: { name: 'calc' } }])(
       'omits server tools when a tool is forced with %j',
       async (toolChoice) => {
+        const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
         const { captured, mockClient } = setupCapture()
         const provider = new AnthropicModel({
           client: mockClient,
@@ -2235,8 +2236,26 @@ describe('AnthropicModel', () => {
 
         expect(captured.request.tools).toEqual([FUNCTION_TOOL])
         expect(captured.request.tool_choice.type).toBe(Object.keys(toolChoice)[0])
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('server_tools=<web_search,web_search> | forced tool call, omitting server tools')
+        )
+        warnSpy.mockRestore()
       }
     )
+
+    it('does not let params.tools reach a forced turn that has no function tools', async () => {
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+      const { captured, mockClient } = setupCapture()
+      const provider = new AnthropicModel({ client: mockClient, params: { tools: [WEB_SEARCH_TOOL] } })
+
+      await collectIterator(
+        provider.stream([new Message({ role: 'user', content: [new TextBlock('Hi')] })], { toolChoice: { any: {} } })
+      )
+
+      expect(captured.request).not.toHaveProperty('tools')
+      expect(captured.request).not.toHaveProperty('tool_choice')
+      warnSpy.mockRestore()
+    })
 
     it('applies toolChoice when only server tools are configured', async () => {
       const { captured, mockClient } = setupCapture()

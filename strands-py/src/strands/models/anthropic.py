@@ -502,11 +502,17 @@ class AnthropicModel(Model):
         ]
 
         params = self.config.get("params") or {}
+        server_tools = [*(self.config.get("anthropic_tools") or []), *(params.get("tools") or [])]
         # Forcing a tool means this turn must call a function tool, so server tools are left out.
         if tool_choice is None or "auto" in tool_choice:
             # Copied so the cache_control below never lands on the caller's config.
-            tools.extend(dict(tool) for tool in self.config.get("anthropic_tools") or [])
-            tools.extend(dict(tool) for tool in params.get("tools") or [])
+            tools.extend(dict(tool) for tool in server_tools)
+        elif server_tools:
+            logger.warning(
+                "tool_choice=<%s>, server_tools=<%s> | forced tool call, omitting server tools",
+                next(iter(tool_choice)),
+                [tool.get("name") for tool in server_tools],
+            )
 
         # A cache_control on the final tool caches all of them, so one cache point suffices.
         if tools and (cache_control := self._resolve_tools_cache()):

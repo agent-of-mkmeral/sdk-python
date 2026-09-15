@@ -46,13 +46,13 @@ const SERVER_TOOL_BLOCK_TYPES = new Set([
   'web_search_tool_result',
 ])
 
-/**
- * `ephemeral` is the only cache type the Anthropic API supports.
- */
 // Anthropic pauses a long server-side tool turn with stop_reason=pause_turn and expects the paused
 // assistant message to be sent back as-is to resume it. Bounds how many times stream() does so.
 const MAX_PAUSE_TURN_CONTINUATIONS = 10
 
+/**
+ * `ephemeral` is the only cache type the Anthropic API supports.
+ */
 const ANTHROPIC_CACHE_TYPE = 'ephemeral' as const
 
 const TEXT_FILE_FORMATS = ['txt', 'md', 'markdown', 'csv', 'json', 'xml', 'html', 'yml', 'yaml', 'js', 'ts', 'py']
@@ -550,12 +550,18 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
       description: tool.description,
       input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
     }))
+    const serverTools = [
+      ...(this._config.anthropicTools ?? []),
+      ...((this._config.params?.tools as Anthropic.ToolUnion[] | undefined) ?? []),
+    ]
     // Forcing a tool means this turn must call a function tool, so server tools are left out.
     if (!options?.toolChoice || 'auto' in options.toolChoice) {
       // Copied so the cache_control below never lands on the caller's config.
-      const paramsTools = (this._config.params?.tools as Anthropic.ToolUnion[] | undefined) ?? []
-      tools.push(...(this._config.anthropicTools ?? []).map((tool) => ({ ...tool })))
-      tools.push(...paramsTools.map((tool) => ({ ...tool })))
+      tools.push(...serverTools.map((tool) => ({ ...tool })))
+    } else if (serverTools.length > 0) {
+      logger.warn(
+        `tool_choice=<${Object.keys(options.toolChoice)[0]}>, server_tools=<${serverTools.map((tool) => tool.name).join(',')}> | forced tool call, omitting server tools`
+      )
     }
 
     // A cache_control on the last tool caches all of them, so one cache point suffices.
@@ -579,7 +585,9 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
     if (this._config.topP !== undefined) request.top_p = this._config.topP
     if (this._config.stopSequences !== undefined) request.stop_sequences = this._config.stopSequences
     if (this._config.params) Object.assign(request, this._config.params)
+    // params.tools is already merged into tools above; never let it bypass the forced-turn rule.
     if (tools.length > 0) request.tools = tools
+    else delete request.tools
 
     return request
   }

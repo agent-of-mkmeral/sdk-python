@@ -15,6 +15,8 @@ from strands.models.anthropic import AnthropicModel
 from strands.models.model import CacheConfig, CacheToolsConfig
 from strands.types.exceptions import ContextWindowOverflowException, ModelThrottledException
 
+WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 3}
+
 
 @pytest.fixture
 def anthropic_client():
@@ -2416,9 +2418,6 @@ class TestPromptCaching:
         assert "system" not in request
 
 
-WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search", "max_uses": 3}
-
-
 @pytest.fixture
 def tool_spec():
     return {"description": "description", "name": "name", "inputSchema": {"json": {"key": "val"}}}
@@ -2508,8 +2507,9 @@ def test_format_request_with_params_tools(anthropic_client, model_id, max_tokens
 
 @pytest.mark.parametrize("tool_choice", [{"any": {}}, {"tool": {"name": "test_tool"}}])
 def test_format_request_forced_tool_choice_omits_server_tools(
-    anthropic_client, model_id, max_tokens, messages, tool_choice
+    anthropic_client, model_id, max_tokens, messages, tool_choice, caplog
 ):
+    caplog.set_level(logging.WARNING, logger="strands.models.anthropic")
     tool_spec = {"description": "d", "name": "test_tool", "inputSchema": {"json": {}}}
     model = AnthropicModel(
         model_id=model_id, max_tokens=max_tokens, anthropic_tools=[WEB_SEARCH_TOOL], params={"tools": [WEB_SEARCH_TOOL]}
@@ -2519,6 +2519,7 @@ def test_format_request_forced_tool_choice_omits_server_tools(
 
     assert request["tools"] == [{"name": "test_tool", "description": "d", "input_schema": {}}]
     assert request["tool_choice"]["type"] == next(iter(tool_choice))
+    assert "server_tools=<['web_search', 'web_search']> | forced tool call, omitting server tools" in caplog.text
 
 
 def test_format_request_auto_tool_choice_keeps_server_tools(
@@ -2704,17 +2705,14 @@ async def test_stream_continues_paused_server_tool_turn(anthropic_client, model,
 
 @pytest.mark.asyncio
 async def test_stream_pause_turn_continuation_limit(anthropic_client, model, alist):
-    limit = strands.models.anthropic._MAX_PAUSE_TURN_CONTINUATIONS
     anthropic_client.messages.stream.side_effect = [
-        generate_mock_stream_context(paused_stream_events(), final_message=paused_final_message([]))
-        for _ in range(limit + 1)
+        generate_mock_stream_context(paused_stream_events(), final_message=paused_final_message([])) for _ in range(11)
     ]
 
-    with pytest.raises(RuntimeError, match=f"did not complete after {limit} continuations"):
+    with pytest.raises(RuntimeError, match="did not complete after 10 continuations"):
         await alist(model.stream([{"role": "user", "content": [{"text": "hi"}]}]))
 
-    assert limit == 10
-    assert anthropic_client.messages.stream.call_count == limit + 1
+    assert anthropic_client.messages.stream.call_count == 11
 
 
 @pytest.mark.asyncio
