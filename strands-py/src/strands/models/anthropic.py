@@ -510,7 +510,7 @@ class AnthropicModel(Model):
         elif server_tools:
             logger.warning(
                 "tool_choice=<%s>, server_tools=<%s> | forced tool call, omitting server tools",
-                next(iter(tool_choice)),
+                next(iter(tool_choice), None),
                 [tool.get("name") for tool in server_tools],
             )
 
@@ -905,6 +905,9 @@ class AnthropicModel(Model):
 
         Yields:
             Formatted message chunks from the model.
+
+        A server-side tool turn that Anthropic pauses is resumed with follow-up requests inside this call, so
+        an error raised by one of those requests can surface after earlier chunks were already yielded.
 
         Raises:
             ContextWindowOverflowException: If the input exceeds the model's context window.

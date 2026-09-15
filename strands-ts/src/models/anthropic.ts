@@ -228,6 +228,16 @@ export class AnthropicModel extends Model<AnthropicModelConfig> {
     }
   }
 
+  /**
+   * Streams a conversation with the Anthropic model.
+   *
+   * A server-side tool turn that Anthropic pauses is resumed with follow-up requests inside this call, so
+   * an error thrown by one of those requests can surface after earlier events were already yielded.
+   *
+   * @param messages - Array of conversation messages
+   * @param options - Optional streaming configuration
+   * @returns Async iterable of streaming events
+   */
   async *stream(messages: Message[], options?: StreamOptions): AsyncIterable<ModelStreamEvent> {
     try {
       let request = this._formatRequest(messages, options)

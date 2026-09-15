@@ -2522,6 +2522,16 @@ def test_format_request_forced_tool_choice_omits_server_tools(
     assert "server_tools=<['web_search', 'web_search']> | forced tool call, omitting server tools" in caplog.text
 
 
+def test_format_request_empty_tool_choice_omits_server_tools(anthropic_client, model_id, max_tokens, messages):
+    tool_spec = {"description": "d", "name": "test_tool", "inputSchema": {"json": {}}}
+    model = AnthropicModel(model_id=model_id, max_tokens=max_tokens, anthropic_tools=[WEB_SEARCH_TOOL])
+
+    request = model.format_request(messages, [tool_spec], tool_choice={})
+
+    assert request["tools"] == [{"name": "test_tool", "description": "d", "input_schema": {}}]
+    assert "tool_choice" not in request
+
+
 def test_format_request_auto_tool_choice_keeps_server_tools(
     anthropic_client, model_id, max_tokens, messages, tool_spec
 ):
